@@ -44,13 +44,23 @@ fn receive_string(stream: &mut TcpStream) -> io::Result<String> {
             "String data packet began with wrong ID"
         ));
     }
-    stream.read(&mut buf.as_mut_slice())?;
+    let mut read = 0;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
+    while read != length {
+        read += match stream.read(&mut buf.as_mut_slice()[read..]) {
+            Ok(len) => len,
+            Err(_) => {
+                break;
+            }
+        }
+    }
+    stream.set_read_timeout(None)?;
     unsafe { Ok(String::from_utf8_unchecked(buf)) }
 }
 
 fn on_receive(_: Vec<String>) {}
 
-static mut RECEIVER: fn(Vec<String>) = on_receive;
+static mut RECEIVER: Receiver = Receiver::CLIStyle(on_receive);
 static mut COMM_CHANNEL: Option<Arc<UnsafeCell<TcpStream>>> = None;
 
 pub fn send(message: &str) -> bool {
@@ -65,7 +75,12 @@ pub fn send(message: &str) -> bool {
     }
 }
 
-pub fn set_on_receive(receiver: fn(Vec<String>)) {
+pub enum Receiver {
+    CLIStyle(fn(Vec<String>)),
+    Normal(fn(String))
+}
+
+pub fn set_on_receive(receiver: Receiver) {
     unsafe {
         RECEIVER = receiver;
     }
@@ -92,16 +107,21 @@ pub fn start_client(ip: &str, port: u16) {
         loop {
             match receive_string(comm_channel) {
                 Ok(s) => {
-                    let args = s.split_ascii_whitespace().filter_map(|x| {
-                        let x = x.trim();
-                        if x.is_empty() {
-                            None
-                        } else {
-                            Some(String::from(x))
+                    match unsafe { &RECEIVER } {
+                        Receiver::CLIStyle(func) => {
+                            let args = s.split_ascii_whitespace().filter_map(|x| {
+                                let x = x.trim();
+                                if x.is_empty() {
+                                    None
+                                } else {
+                                    Some(String::from(x))
+                                }
+                            }).collect();
+                            func(args)
+                        },
+                        Receiver::Normal(func) => {
+                            func(s)
                         }
-                    }).collect();
-                    unsafe {
-                        RECEIVER(args)
                     }
                 },
                 Err(_) => {
@@ -110,6 +130,12 @@ pub fn start_client(ip: &str, port: u16) {
                 }
             }
         }
+    }
+}
+
+pub fn is_connected() -> bool {
+    unsafe {
+        COMM_CHANNEL.is_some()
     }
 }
 
@@ -137,18 +163,23 @@ pub fn start_server(host_name: &str, port: u16) {
         loop {
             match receive_string(comm_channel) {
                 Ok(s) => {
-                    let args = s.split_ascii_whitespace().filter_map(|x| {
-                        let x = x.trim();
-                        if x.is_empty() {
-                            None
-                        } else {
-                            Some(String::from(x))
+                    match unsafe { &RECEIVER } {
+                        Receiver::CLIStyle(func) => {
+                            let args = s.split_ascii_whitespace().filter_map(|x| {
+                                let x = x.trim();
+                                if x.is_empty() {
+                                    None
+                                } else {
+                                    Some(String::from(x))
+                                }
+                            }).collect();
+                            func(args)
+                        },
+                        Receiver::Normal(func) => {
+                            func(s)
                         }
-                    }).collect();
-                    unsafe {
-                        RECEIVER(args)
                     }
-                }
+                },
                 Err(_) => {
                     let _ = send_string("Failed to read message. Disconnecting from server.", comm_channel);
                     break;
